@@ -1,0 +1,127 @@
+#!/bin/bash
+
+CONTEXT=minikube
+NAMESPACE=default
+ARGS=()
+
+
+get_state() {
+    KEY="${ARGS[0]}__${ARGS[1]}"
+    echo "KEY: $KEY"
+    NAME="${KEY//\//_}"
+    echo "NAME: $NAME"
+    LOG_FILE="$STATE_DIR/${NAME}.log"
+    PID_FILE="$STATE_DIR/${NAME}.pid"
+}
+
+start() {
+    get_state
+    if [ -f "$PID_FILE" ]; then
+        echo "$KEY [$CONTEXT]: already running (pid $(cat $PID_FILE)), $PID_FILE"
+        tail "$LOG_FILE"
+        exit 1
+    fi
+
+    kubectl -n $NAMESPACE --context=$CONTEXT "${ARGS[@]}" > "$LOG_FILE" 2>&1 &
+    pid=$!
+    echo $pid > "$PID_FILE"
+    echo "$KEY [$CONTEXT]: started (pid $pid, log $LOG_FILE)"
+    sleep 1
+    tail "$LOG_FILE"
+}
+
+stop() {
+    get_state
+    if [ ! -f "$PID_FILE" ]; then
+        echo "$KEY [$CONTEXT]: not running"
+        exit 1
+    fi
+    pid=$(cat "$PID_FILE")
+    kill "$pid" && rm -f "$PID_FILE"
+    echo "$KEY [$CONTEXT]: stopped"
+}
+
+list() {
+    for pidf in $STATE_DIR/*.pid; do
+        [ -e "$pidf" ] || continue
+        name=$(basename "${pidf%.pid}")
+        # Split context and key using __ separator
+        context="${name%%__*}"
+        key="${name#${context}__}"
+        key="${key//_//}"
+        pid=$(cat "$pidf")
+        echo "$key [$context] (pid $pid, file $pidf)"
+    done
+}
+
+ACTION=tbd
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --context=*)
+            CONTEXT="${1#--context=}"
+            shift
+            ;;
+        -n)
+            NAMESPACE="$2"
+            shift
+            shift
+            ;;
+        --help)
+            ACTION=help
+            shift
+            ;;
+        start)
+            ACTION=start
+            shift
+            ;;
+        stop)
+            ACTION=stop
+            shift
+            ;;
+        restart)
+            ACTION=restart
+            shift
+            ;;
+        list)
+            ACTION=list
+            shift
+            ;;
+        help)
+            ACTION=help
+            shift
+            ;;
+        *)
+            ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+STATE_DIR="${HOME}/.mykubectl/$CONTEXT"
+mkdir -p "$STATE_DIR"
+
+echo "[${ARGS[*]}]"
+if [ "$ACTION" = "help" ]; then
+    echo "Usage: $0 [--context=context] {start|stop|list} port-forward <target> <local-port>:<target-port>"
+    echo "Example: $0 start -p dev -c minikube port-forward service/apache-hello-world 8080:80"
+    echo "         $0 -p prod -c minikube stop port-forward service/apache-hello-world"
+    echo "         $0 list -p staging -c minikube"
+    exit 0
+fi
+if [ "$ACTION" = "start" ]; then
+    start "$ARGS"
+fi
+
+if [ "$ACTION" = "stop" ]; then
+    stop "$ARGS"
+fi
+
+if [ "$ACTION" = "restart" ]; then
+    stop "$ARGS"
+    start "$ARGS"
+fi
+
+if [ "$ACTION" = "list" ]; then
+    list
+fi

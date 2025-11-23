@@ -1,0 +1,426 @@
+# Create monitoring namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---  
+# apache-hello-world deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apache-hello-world
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: apache-hello-world
+  template:
+    metadata:
+      labels:
+        app: apache-hello-world
+    spec:
+      containers:
+      - name: apache-hello-world
+        image: apache-hello-world:local
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 80
+---
+# 
+apiVersion: v1
+kind: Service
+metadata:
+  name: apache-hello-world
+spec:
+  selector:
+    app: apache-hello-world
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  type: NodePort
+---
+# python-hello-world deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-hello-world
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: python-hello-world
+  template:
+    metadata:
+      labels:
+        app: python-hello-world
+    spec:
+      containers:
+      - name: python-hello-world
+        image: python-hello-world:local
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 80
+---
+# python-hello-world service
+apiVersion: v1
+kind: Service
+metadata:
+  name: python-hello-world
+spec:
+  selector:
+    app: python-hello-world
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  type: NodePort
+---
+# nginx load balancer Config Map for the python hello world
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-python-lb-config
+data:
+  nginx.conf: |
+    events {}
+    http {
+      upstream python-backends {
+        server python-hello-world.default.svc.cluster.local:80;
+      }
+      server {
+        listen 80;
+        location / {
+          proxy_pass http://python-backends;
+        }
+        location /nginx_status {
+          stub_status;
+          allow 127.0.0.1;
+          deny all;
+        }
+      }
+    }
+---
+# nginx load balancer deployment for the python hello world
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-python-lb
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx-python-lb
+  template:
+    metadata:
+      labels:
+        app: nginx-python-lb
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9113"
+        prometheus.io/path: "/metrics"
+    spec:
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: nginx-python-lb-config
+      containers:
+      - name: nginx
+        image: nginx:1.25-alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+      - name: nginx-exporter
+        image: nginx/nginx-prometheus-exporter:1.1.0
+        args:
+          - -nginx.scrape-uri=http://localhost/nginx_status
+        ports:
+        - containerPort: 9113
+---
+# Service to expose the metrics of the nginx-python-lb to be monitored by Prometheus
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-python-lb-metrics
+  namespace: default
+  labels:
+    app: nginx-python-lb           # <-- label we’ll match in ServiceMonitor
+spec:
+  selector:
+    app: nginx-python-lb
+  ports:
+    - name: metrics
+      port: 9113
+      targetPort: 9113
+---
+# nginx load balancer service for the python hello world
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-python-lb
+spec:
+  selector:
+    app: nginx-python-lb
+  ports:
+  - port: 80
+    targetPort: 80
+    nodePort: 30091
+  type: NodePort      
+---
+# kube-state-metrics deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+  labels:
+    app: kube-state-metrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kube-state-metrics
+  template:
+    metadata:
+      labels:
+        app: kube-state-metrics
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      serviceAccountName: kube-state-metrics
+      containers:
+        - name: kube-state-metrics
+          image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.10.0
+          ports:
+            - containerPort: 8080
+---
+# kube-state-metrics service account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+---
+# kube-state-metrics service
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+spec:
+  selector:
+    app: kube-state-metrics
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# node-exporter daemonset
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: monitoring
+  labels:
+    app: node-exporter
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      hostPID: true
+      containers:
+        - name: node-exporter
+          image: prom/node-exporter:v1.8.1
+          ports:
+            - containerPort: 9100
+          resources:
+            limits:
+              memory: 200Mi
+              cpu: 100m
+          securityContext:
+            privileged: true
+---
+# prometheus service account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: monitoring
+---
+# prometheus cluster role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/metrics
+      - services
+      - endpoints
+      - pods
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources:
+      - statefulsets
+      - deployments
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources:
+      - servicemonitors
+    verbs: ["get", "list", "watch"]
+---
+# prometheus cluster role binding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoring
+---
+# prometheus config map
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 10s
+      evaluation_interval: 30s
+
+    scrape_configs:
+      - job_name: 'node-exporter'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: node-exporter
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_ip]
+            target_label: __address__
+            replacement: $1:9100
+
+      - job_name: 'kube-state-metrics'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: kube-state-metrics
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_ip]
+            target_label: __address__
+            replacement: $1:8080
+
+      - job_name: 'nginx-python-lb-pods'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: nginx-python-lb
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            target_label: __address__
+            separator: ":"
+            regex: (.+);(.+)
+            replacement: $1:$2
+---
+# prometheus deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.52.0
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.retention.time=6h"
+            - "--web.enable-lifecycle"
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus/
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+---
+# prometheus service
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  selector:
+    app: prometheus
+  ports:
+    - port: 9090
+      targetPort: 9090
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nginx-python-lb
+  namespace: monitoring
+  labels:
+    release: monitoring            # <-- IMPORTANT: match your Helm release name
+spec:
+  namespaceSelector:
+    matchNames: ["default"]        # scrape targets in the default ns
+  selector:
+    matchLabels:
+      app: nginx-python-lb         # matches the Service’s label
+  endpoints:
+    - port: metrics                # matches the Service port name
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s

@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  apache-hello-world:
+    build:
+      context: ../specs/apache-hello-world
+    ports:
+      - "8080:80"
+    container_name: apache-hello-world
+  python-hello-world:
+    build:
+      context: ../specs/python-hello-world
+    ports:
+      - "8081:80"
+    container_name: python-hello-world
